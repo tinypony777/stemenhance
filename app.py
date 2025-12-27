@@ -164,46 +164,138 @@ def run(
 
 def main():
     title = "Bakuage Stem Enhancer (local)"
-    description = (
-        "AI生成音源のステムに対して、アーティファクト低減 / ヒス低減 / トランジェント復元 / 簡易フェーズアラインをまとめて実行します。\n\n"
-        "推奨: 48kHz WAVステム"
-    )
+    description = "AI生成音源のステムに対して、アーティファクト低減 / ヒス低減 / トランジェント復元 / 簡易フェーズアラインをまとめて実行します。"
 
-    iface = gr.Interface(
-        fn=run,
-        title=title,
-        description=description,
-        inputs=[
-            gr.inputs.File(label="Stems (multiple)", file_count="multiple", type="file"),
-            gr.inputs.File(label="MIDI (optional, multiple)", file_count="multiple", type="file", optional=True),
-            gr.inputs.Textbox(
-                label="Instrument mapping (optional)",
-                default="# JSON 例\n# {\"vocals.wav\": \"vocals\", \"drums.wav\": \"drums\"}\n\n# YAML風 例\n# vocals.wav: vocals\n# drums.wav: drums\n",
-                lines=6,
-            ),
-            gr.inputs.Slider(minimum=0, maximum=1, default=0.55, label="Artifact reduction strength"),
-            gr.inputs.Slider(minimum=0, maximum=1, default=0.35, label="Hiss reduction strength"),
-            gr.inputs.Slider(minimum=0, maximum=1, default=0.45, label="Transient restore amount"),
-            gr.inputs.Slider(
-                minimum=0,
-                maximum=1,
-                default=0.35,
-                label="Cymbal tame (drums) – reduce long sustain / fizz / wide sizzle",
-            ),
-            gr.inputs.Checkbox(default=True, label="Phase/timing align"),
-            gr.inputs.Checkbox(default=False, label="Phase match (freq-constant)"),
-            gr.inputs.Slider(minimum=0, maximum=150, default=80, step=1, label="Max delay (ms)"),
-            gr.inputs.Textbox(label="Anchor stem name (optional, default=auto)", default="auto"),
-            gr.inputs.Dropdown(choices=["PCM_16", "PCM_24", "PCM_32"], default="PCM_24", label="Output WAV bit depth"),
-        ],
-        outputs=[
-            gr.outputs.File(label="Download enhanced stems (zip)"),
-            gr.outputs.Textbox(label="Report"),
-        ],
-        allow_flagging=False,
-    )
+    with gr.Blocks(title=title, theme=gr.themes.Soft()) as demo:
+        gr.Markdown(f"# {title}\n{description}\n\n**推奨:** 48kHz WAVステム")
 
-    iface.launch(server_name="127.0.0.1", server_port=7860)
+        with gr.Row():
+            with gr.Column(scale=2):
+                gr.Markdown("## 1. 入力")
+                stems_files = gr.File(
+                    label="Stems (multiple)",
+                    file_count="multiple",
+                    type="filepath",
+                )
+                midi_files = gr.File(
+                    label="MIDI (optional, multiple)",
+                    file_count="multiple",
+                    type="filepath",
+                )
+                instrument_mapping = gr.Textbox(
+                    label="Instrument mapping (optional)",
+                    value="# JSON 例\n# {\"vocals.wav\": \"vocals\", \"drums.wav\": \"drums\"}\n\n# YAML風 例\n# vocals.wav: vocals\n# drums.wav: drums\n",
+                    lines=6,
+                )
+                output_subtype = gr.Dropdown(
+                    choices=["PCM_16", "PCM_24", "PCM_32"],
+                    value="PCM_24",
+                    label="Output WAV bit depth",
+                )
+            with gr.Column(scale=3):
+                gr.Markdown("## 2. 調整")
+                with gr.Tabs():
+                    with gr.TabItem("Noise & Detail"):
+                        artifact_strength = gr.Slider(
+                            minimum=0,
+                            maximum=1,
+                            value=0.55,
+                            label="Artifact reduction strength",
+                        )
+                        hiss_strength = gr.Slider(
+                            minimum=0,
+                            maximum=1,
+                            value=0.35,
+                            label="Hiss reduction strength",
+                        )
+                        cymbal_tame = gr.Slider(
+                            minimum=0,
+                            maximum=1,
+                            value=0.35,
+                            label="Cymbal tame (drums) – reduce long sustain / fizz / wide sizzle",
+                        )
+                    with gr.TabItem("Transient"):
+                        transient_amount = gr.Slider(
+                            minimum=0,
+                            maximum=1,
+                            value=0.45,
+                            label="Transient restore amount",
+                        )
+                    with gr.TabItem("Phase"):
+                        do_phase_align = gr.Checkbox(value=True, label="Phase/timing align")
+                        phase_match = gr.Checkbox(value=False, label="Phase match (freq-constant)")
+                        max_delay_ms = gr.Slider(
+                            minimum=0,
+                            maximum=150,
+                            value=80,
+                            step=1,
+                            label="Max delay (ms)",
+                        )
+                        anchor_name = gr.Textbox(label="Anchor stem name (optional, default=auto)", value="auto")
+
+        with gr.Row():
+            run_button = gr.Button("Run enhancement", variant="primary")
+            clear_button = gr.Button("Clear")
+
+        gr.Markdown("## 3. 出力")
+        output_zip = gr.File(label="Download enhanced stems (zip)")
+        report = gr.Textbox(label="Report", lines=12)
+
+        run_button.click(
+            fn=run,
+            inputs=[
+                stems_files,
+                midi_files,
+                instrument_mapping,
+                artifact_strength,
+                hiss_strength,
+                transient_amount,
+                cymbal_tame,
+                do_phase_align,
+                phase_match,
+                max_delay_ms,
+                anchor_name,
+                output_subtype,
+            ],
+            outputs=[output_zip, report],
+        )
+        clear_button.click(
+            fn=lambda: (
+                [],
+                [],
+                "# JSON 例\n# {\"vocals.wav\": \"vocals\", \"drums.wav\": \"drums\"}\n\n# YAML風 例\n# vocals.wav: vocals\n# drums.wav: drums\n",
+                0.55,
+                0.35,
+                0.45,
+                0.35,
+                True,
+                False,
+                80,
+                "auto",
+                "PCM_24",
+                None,
+                "",
+            ),
+            inputs=[],
+            outputs=[
+                stems_files,
+                midi_files,
+                instrument_mapping,
+                artifact_strength,
+                hiss_strength,
+                transient_amount,
+                cymbal_tame,
+                do_phase_align,
+                phase_match,
+                max_delay_ms,
+                anchor_name,
+                output_subtype,
+                output_zip,
+                report,
+            ],
+        )
+
+    demo.launch(server_name="127.0.0.1", server_port=7860)
 
 
 if __name__ == "__main__":
