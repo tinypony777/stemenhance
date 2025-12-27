@@ -53,6 +53,39 @@ PRESET_MULT = {
 }
 
 
+def _unique_name(name: str, used: set[str]) -> str:
+    if name not in used:
+        return name
+    base, ext = os.path.splitext(name)
+    idx = 2
+    candidate = f"{base}__{idx}{ext}"
+    while candidate in used:
+        idx += 1
+        candidate = f"{base}__{idx}{ext}"
+    return candidate
+
+
+def _ensure_unique_stem_names(stems: List[StemItem]) -> Tuple[List[StemItem], Dict[str, List[str]]]:
+    """Return stems with unique names and a map of original -> unique list."""
+    used: set[str] = set()
+    name_map: Dict[str, List[str]] = {}
+    out: List[StemItem] = []
+    for item in stems:
+        unique = _unique_name(item.name, used)
+        used.add(unique)
+        if unique != item.name:
+            name_map.setdefault(item.name, []).append(unique)
+        out.append(
+            StemItem(
+                name=unique,
+                path=item.path,
+                instrument=item.instrument,
+                midi_hint=item.midi_hint,
+            )
+        )
+    return out, name_map
+
+
 def _pad_to_length(y: np.ndarray, length: int) -> np.ndarray:
     if y.shape[0] == length:
         return y
@@ -106,6 +139,8 @@ def enhance_stems(
 
     if len(stems) == 0:
         raise ValueError("No stems provided")
+
+    stems, name_map = _ensure_unique_stem_names(stems)
 
     # 1) load + resample
     loaded: Dict[str, AudioData] = {}
@@ -236,6 +271,8 @@ def enhance_stems(
         "per_stem": per_stem_params,
         "phase": phase_meta,
     }
+    if name_map:
+        meta["name_map"] = name_map
     meta_path = os.path.join(output_dir, "enhance_report.json")
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)

@@ -132,6 +132,14 @@ def run(
     for k, v in meta.get("instrument_map", {}).items():
         lines.append(f"  - {k}: {v}")
 
+    name_map = meta.get("name_map")
+    if name_map:
+        lines.append("")
+        lines.append("Renamed duplicate stems:")
+        for original, uniques in name_map.items():
+            for unique in uniques:
+                lines.append(f"  - {original} -> {unique}")
+
     phase = meta.get("phase")
     if phase:
         lines.append("")
