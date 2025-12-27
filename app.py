@@ -2,300 +2,124 @@ from __future__ import annotations
 
 import json
 import os
-import re
-import tempfile
-from typing import Dict, List, Optional, Tuple
+from pathlib import Path
 
 import gradio as gr
 
-from stem_enhance.pipeline import EnhanceOptions, StemItem, enhance_stems
+from stem_enhancer.pipeline import Options, process_stems
+from stem_enhancer.utils import normalize_file_list, parse_mapping_text
 
 
-def _parse_mapping(text: str) -> Dict[str, str]:
-    """Parse user mapping.
-
-    Accepts:
-    - JSON dict: {"filename.wav": "vocals", ...}
-    - YAML-ish lines: filename: instrument
-    """
-
-    if not text or not text.strip():
-        return {}
-
-    t = text.strip()
-
-    # JSON first
-    try:
-        obj = json.loads(t)
-        if isinstance(obj, dict):
-            return {str(k): str(v) for k, v in obj.items()}
-    except Exception:
-        pass
-
-    # YAML-ish
-    mapping: Dict[str, str] = {}
-    for line in t.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if ":" not in line:
-            continue
-        k, v = line.split(":", 1)
-        mapping[k.strip()] = v.strip()
-    return mapping
+def _ensure_stable_tmp() -> str:
+    tmp_base = Path.home() / "Library" / "Caches" / "bakuage-stem-enhancer" / "tmp"
+    tmp_base.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("TMPDIR", str(tmp_base))
+    os.environ.setdefault("GRADIO_TEMP_DIR", str(tmp_base))
+    return str(tmp_base)
 
 
-def _match_midi_hints(stem_paths: List[str], midi_paths: List[str]) -> Dict[str, str]:
-    """Return stem filename -> midi filename mapping by basename similarity."""
-
-    midi_by_base = {}
-    for mp in midi_paths:
-        base = os.path.splitext(os.path.basename(mp))[0].lower()
-        midi_by_base[base] = mp
-
-    out: Dict[str, str] = {}
-    for sp in stem_paths:
-        sbase = os.path.splitext(os.path.basename(sp))[0].lower()
-        # direct match
-        if sbase in midi_by_base:
-            out[os.path.basename(sp)] = os.path.basename(midi_by_base[sbase])
-            continue
-        # partial match
-        for mb, mp in midi_by_base.items():
-            if mb in sbase or sbase in mb:
-                out[os.path.basename(sp)] = os.path.basename(mp)
-                break
-    return out
+_ensure_stable_tmp()
 
 
 def run(
-    stems_files,
-    midi_files,
-    instrument_mapping,
-    artifact_strength,
-    hiss_strength,
-    transient_amount,
-    cymbal_tame,
-    do_phase_align,
-    phase_match,
-    max_delay_ms,
-    anchor_name,
-    output_subtype,
+    stems,
+    mix,
+    mapping_text,
+    artifact,
+    hiss,
+    transient,
+    cymbal,
+    cymbal_attack,
+    phase_align,
+    progress=gr.Progress(),
 ):
-    # gradio 2.x File input returns file objects or paths depending on `type`
-    def _to_paths(file_in):
-        if file_in is None:
-            return []
-        if isinstance(file_in, list):
-            return [getattr(f, "name", f) for f in file_in]
-        return [getattr(file_in, "name", file_in)]
+    stem_paths = normalize_file_list(stems)
+    mix_paths = normalize_file_list(mix)
+    mix_path = mix_paths[0] if mix_paths else None
+    mapping = parse_mapping_text(mapping_text)
 
-    stem_paths = _to_paths(stems_files)
-    midi_paths = _to_paths(midi_files)
-
-    if not stem_paths:
-        return None, "No stems uploaded."
-
-    user_map = _parse_mapping(instrument_mapping)
-    midi_hint_map = _match_midi_hints(stem_paths, midi_paths)
-
-    stems: List[StemItem] = []
-    for p in stem_paths:
-        name = os.path.basename(p)
-        inst = user_map.get(name) or user_map.get(os.path.splitext(name)[0]) or "auto"
-        midi_hint = midi_hint_map.get(name)
-        stems.append(StemItem(name=name, path=p, instrument=inst, midi_hint=midi_hint))
-
-    opt = EnhanceOptions(
-        target_sr=48000,
-        artifact_strength=float(artifact_strength),
-        hiss_strength=float(hiss_strength),
-        transient_amount=float(transient_amount),
-        cymbal_tame=float(cymbal_tame),
-        do_phase_align=bool(do_phase_align),
-        phase_anchor=(anchor_name.strip() if anchor_name and anchor_name.strip() else "auto"),
-        phase_match=bool(phase_match),
-        max_delay_ms=float(max_delay_ms),
-        keep_relative_level=True,
-        output_subtype=str(output_subtype),
+    opts = Options(
+        artifact=float(artifact),
+        hiss=float(hiss),
+        transient=float(transient),
+        cymbal=float(cymbal),
+        cymbal_attack=float(cymbal_attack),
+        phase_align=bool(phase_align),
     )
 
-    out_dir = tempfile.mkdtemp(prefix="bakuage_stem_enhance_")
-    zip_path, meta = enhance_stems(stems, opt=opt, output_dir=out_dir)
+    def cb(msg: str, p: float):
+        try:
+            progress(p, desc=msg)
+        except Exception:
+            pass
 
-    # Human-readable report
-    lines = []
-    lines.append("Bakuage Stem Enhancer report")
-    lines.append(f"Output: {zip_path}")
-    lines.append("")
-    lines.append("Instrument map:")
-    for k, v in meta.get("instrument_map", {}).items():
-        lines.append(f"  - {k}: {v}")
+    zip_path, report = process_stems(stem_paths, mix_path, mapping, opts, progress=cb)
+    report_text = json.dumps(report, ensure_ascii=False, indent=2)
+    return zip_path, report_text
 
-    name_map = meta.get("name_map")
-    if name_map:
-        lines.append("")
-        lines.append("Renamed duplicate stems:")
-        for original, uniques in name_map.items():
-            for unique in uniques:
-                lines.append(f"  - {original} -> {unique}")
 
-    phase = meta.get("phase")
-    if phase:
-        lines.append("")
-        lines.append(f"Phase align anchor: {phase.get('anchor')}")
-        delays = phase.get("delays_samples", {})
-        inv = phase.get("inverted", {})
-        for k in sorted(delays.keys()):
-            lines.append(f"  - {k}: delay={delays[k]:.2f} samples, inverted={inv.get(k, False)}")
+with gr.Blocks(title="Bakuage Stem Enhancer") as demo:
+    gr.Markdown(
+        """# Bakuage Stem Enhancer (v0.4.0)
 
-    lines.append("")
-    lines.append("Per-stem applied params:")
-    for k, d in meta.get("per_stem", {}).items():
-        lines.append(
-            f"  - {k} ({d.get('instrument')}): artifact={d.get('artifact_strength'):.2f}, hiss={d.get('hiss_strength'):.2f}, transient={d.get('transient_amount'):.2f}, cymbal={d.get('cymbal_tame'):.2f}, peak_in={d.get('peak_in_dbfs'):.2f} dBFS, peak_out={d.get('peak_out_dbfs'):.2f} dBFS"
+2mixをガイドに、ステム分離で欠損したトランジェントを再配分し、シンバルの不快な洗い感を抑えます。
+
+推奨: **2mix を必ず入力**。
+"""
+    )
+
+    with gr.Row():
+        stems_in = gr.File(
+            label="Stems (multiple WAV)",
+            file_count="multiple",
+            file_types=[".wav", ".aif", ".aiff", ".flac"],
         )
-        g = d.get("guess", {})
-        if g:
-            lines.append(f"      guess={g.get('label')} conf={g.get('confidence'):.2f} reasons={g.get('reasons')}")
+        mix_in = gr.File(
+            label="2mix (WAV) - required in v0.4.0",
+            file_count="single",
+            file_types=[".wav", ".aif", ".aiff", ".flac"],
+        )
 
-    return zip_path, "\n".join(lines)
+    mapping = gr.Textbox(
+        label="Instrument mapping (optional)",
+        lines=4,
+        placeholder="example:\nDrums.wav: drums\nOverheads.wav: cymbals\n",
+    )
+
+    with gr.Row():
+        artifact = gr.Slider(0, 1, value=0.6, step=0.05, label="Artifact reduction (mask smoothing)")
+        hiss = gr.Slider(0, 1, value=0.3, step=0.05, label="Hiss/leak reduction (non-drums high band)")
+    with gr.Row():
+        transient = gr.Slider(0, 1, value=0.6, step=0.05, label="Transient restore (mix-guided reallocation)")
+        phase_align = gr.Checkbox(value=True, label="Global align (delay/polarity) to 2mix")
+    with gr.Row():
+        cymbal = gr.Slider(0, 1, value=0.55, step=0.05, label="Cymbal tame (drums high band)")
+        cymbal_attack = gr.Slider(0, 1, value=0.35, step=0.05, label="Cymbal attack restore (inject from 2mix)")
+
+    run_btn = gr.Button("Process")
+    clear_btn = gr.Button("Clear")
+
+    out_zip = gr.File(label="Output ZIP")
+    out_report = gr.Textbox(label="Report", lines=14)
+
+    run_btn.click(
+        fn=run,
+        inputs=[stems_in, mix_in, mapping, artifact, hiss, transient, cymbal, cymbal_attack, phase_align],
+        outputs=[out_zip, out_report],
+    )
+
+    def _clear():
+        return None, None, "", 0.6, 0.3, 0.6, 0.55, 0.35, True, None, ""
+
+    clear_btn.click(
+        fn=_clear,
+        inputs=[],
+        outputs=[stems_in, mix_in, mapping, artifact, hiss, transient, cymbal, cymbal_attack, phase_align, out_zip, out_report],
+    )
 
 
 def main():
-    title = "Bakuage Stem Enhancer (local)"
-    description = "AI生成音源のステムに対して、アーティファクト低減 / ヒス低減 / トランジェント復元 / 簡易フェーズアラインをまとめて実行します。"
-
-    with gr.Blocks(title=title, theme=gr.themes.Soft()) as demo:
-        gr.Markdown(f"# {title}\n{description}\n\n**推奨:** 48kHz WAVステム")
-
-        with gr.Row():
-            with gr.Column(scale=2):
-                gr.Markdown("## 1. 入力")
-                stems_files = gr.File(
-                    label="Stems (multiple)",
-                    file_count="multiple",
-                    type="filepath",
-                )
-                midi_files = gr.File(
-                    label="MIDI (optional, multiple)",
-                    file_count="multiple",
-                    type="filepath",
-                )
-                instrument_mapping = gr.Textbox(
-                    label="Instrument mapping (optional)",
-                    value="# JSON 例\n# {\"vocals.wav\": \"vocals\", \"drums.wav\": \"drums\"}\n\n# YAML風 例\n# vocals.wav: vocals\n# drums.wav: drums\n",
-                    lines=6,
-                )
-                output_subtype = gr.Dropdown(
-                    choices=["PCM_16", "PCM_24", "PCM_32"],
-                    value="PCM_24",
-                    label="Output WAV bit depth",
-                )
-            with gr.Column(scale=3):
-                gr.Markdown("## 2. 調整")
-                with gr.Tabs():
-                    with gr.TabItem("Noise & Detail"):
-                        artifact_strength = gr.Slider(
-                            minimum=0,
-                            maximum=1,
-                            value=0.55,
-                            label="Artifact reduction strength",
-                        )
-                        hiss_strength = gr.Slider(
-                            minimum=0,
-                            maximum=1,
-                            value=0.35,
-                            label="Hiss reduction strength",
-                        )
-                        cymbal_tame = gr.Slider(
-                            minimum=0,
-                            maximum=1,
-                            value=0.35,
-                            label="Cymbal tame (drums) – reduce long sustain / fizz / wide sizzle",
-                        )
-                    with gr.TabItem("Transient"):
-                        transient_amount = gr.Slider(
-                            minimum=0,
-                            maximum=1,
-                            value=0.45,
-                            label="Transient restore amount",
-                        )
-                    with gr.TabItem("Phase"):
-                        do_phase_align = gr.Checkbox(value=True, label="Phase/timing align")
-                        phase_match = gr.Checkbox(value=False, label="Phase match (freq-constant)")
-                        max_delay_ms = gr.Slider(
-                            minimum=0,
-                            maximum=150,
-                            value=80,
-                            step=1,
-                            label="Max delay (ms)",
-                        )
-                        anchor_name = gr.Textbox(label="Anchor stem name (optional, default=auto)", value="auto")
-
-        with gr.Row():
-            run_button = gr.Button("Run enhancement", variant="primary")
-            clear_button = gr.Button("Clear")
-
-        gr.Markdown("## 3. 出力")
-        output_zip = gr.File(label="Download enhanced stems (zip)")
-        report = gr.Textbox(label="Report", lines=12)
-
-        run_button.click(
-            fn=run,
-            inputs=[
-                stems_files,
-                midi_files,
-                instrument_mapping,
-                artifact_strength,
-                hiss_strength,
-                transient_amount,
-                cymbal_tame,
-                do_phase_align,
-                phase_match,
-                max_delay_ms,
-                anchor_name,
-                output_subtype,
-            ],
-            outputs=[output_zip, report],
-        )
-        clear_button.click(
-            fn=lambda: (
-                [],
-                [],
-                "# JSON 例\n# {\"vocals.wav\": \"vocals\", \"drums.wav\": \"drums\"}\n\n# YAML風 例\n# vocals.wav: vocals\n# drums.wav: drums\n",
-                0.55,
-                0.35,
-                0.45,
-                0.35,
-                True,
-                False,
-                80,
-                "auto",
-                "PCM_24",
-                None,
-                "",
-            ),
-            inputs=[],
-            outputs=[
-                stems_files,
-                midi_files,
-                instrument_mapping,
-                artifact_strength,
-                hiss_strength,
-                transient_amount,
-                cymbal_tame,
-                do_phase_align,
-                phase_match,
-                max_delay_ms,
-                anchor_name,
-                output_subtype,
-                output_zip,
-                report,
-            ],
-        )
-
-    demo.launch(server_name="127.0.0.1", server_port=7860)
+    demo.queue(concurrency_count=1).launch(server_name="127.0.0.1", server_port=7860)
 
 
 if __name__ == "__main__":
